@@ -78,6 +78,7 @@ class IOWorker(Process):
       return self.convert_result(value.strip(b"'\n"))
 
    def send_result(self, value='blank'):
+      log.info('QUEUE: %s' % self.pending)
       default = self.pending.pop()
       if value == 'blank':
          value = default
@@ -122,7 +123,10 @@ class IOWorker(Process):
             elif line.startswith(b'\x1b[A\r\x1b[KPosition'): # sent with calls to 'seek'
                self.stdout.readline() # calls to 'seek' send an extra '\n'
             elif line.startswith(b'ANS'): # sent with 'get_' functions
-               if self.discard_next: self.discard_next = False; continue
+               if self.discard_next:
+                  self.discard_next = False
+                  if not self.pending:
+                     continue
                self.send_result(self.parse_result(line))
 
 
