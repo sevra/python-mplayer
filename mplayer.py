@@ -11,10 +11,12 @@ else: log.setLevel(logging.NOTSET)
 
 compat = lambda func, arg : func(arg, encoding='utf-8' if sys.version > '3' else '')
 
-
 PLAYING = 0
 PAUSED = 1
 STOPPED = 2
+
+
+class MPlayerNotRunning(Exception): pass
 
 
 def SelectQueue():
@@ -24,7 +26,7 @@ def SelectQueue():
 
 
 class IOWorker(Process):
-   def __init__(self, stdin, stdout, state, notifier, calls, results):
+   def __init__(self, stdin, stdout, state, notifier, calls, results, *args, **kargs):
       self.stdin = stdin
       self.stdout = stdout
       self._state = state
@@ -32,7 +34,7 @@ class IOWorker(Process):
       self.calls = calls
       self.results = results
       self.pending = deque()
-      self.discard_next = False
+      self.loading = False
       super(IOWorker, self).__init__()
 
    @property
@@ -50,13 +52,7 @@ class IOWorker(Process):
 
       if value == STOPPED and self.pending:
          # If there is a pending 'get' call and play stops...
-         # ...some tricky shit happens.
-         # The call which was interrupted will return a result
-         # when the next file is loaded. Since we have already
-         # returned a result for this call we must discard the 
-         # next result or the 'pending' queue will fall out of sync.
          log.info('-------------------- CORNER -------------------')
-         self.discard_next = True
          self.send_default()
 
       self.notifier.put(value)
@@ -91,7 +87,10 @@ class IOWorker(Process):
       
    def run(self):
       while True:
-         rfds = [ self.stdout, self.calls ]
+         rfds = [ 
+            self.stdout, 
+            self.calls 
+         ]
       
          try: r, w, e = select(rfds, [], [])
          except (error, IOError): continue
@@ -101,15 +100,17 @@ class IOWorker(Process):
             call = '%s %s\n' % (prefix, cmd)
             log.info('CALLED: %s' % call.rstrip('\n'))
             self.pending.appendleft(default)
-            # TODO This looks like it could be factored
             if cmd.startswith('get'):
-               if self.state == STOPPED:
+               if self.state == STOPPED or self.loading:
                   self.send_default()
                else:
                   self.stdin.write(compat(bytes, call))
             else:
                if cmd.startswith('pause') and self.state in [PAUSED, PLAYING]:
                   self.set_state(PAUSED if self.state == PLAYING else PLAYING)
+               elif cmd.startswith('loadfile'):
+                  self.loading = True
+                  log.info('-------------------- LOADING -------------------')
                self.stdin.write(compat(bytes, call))
                self.send_result(None) # non-get calls always return None
          
@@ -118,15 +119,13 @@ class IOWorker(Process):
             log.info(line)
             if line.startswith(b'Starting play'): # sent when playback has started
                self.set_state(PLAYING)
+               self.loading = False
+               log.info('-------------------- LOADED -------------------')
             elif line == b'\n': # sent when playback has stopped
                self.set_state(STOPPED)
             elif line.startswith(b'\x1b[A\r\x1b[KPosition'): # sent with calls to 'seek'
                self.stdout.readline() # calls to 'seek' send an extra '\n'
             elif line.startswith(b'ANS'): # sent with 'get_' functions
-               if self.discard_next:
-                  self.discard_next = False
-                  if not self.pending:
-                     continue
                self.send_result(self.parse_result(line))
 
 
@@ -136,6 +135,10 @@ class MPlayer(Popen):
       'Float':(float, '%f'),
       'Integer':(int, '%d'),
    }
+
+   @property
+   def state(self):
+      return self._state.value
 
    def __init__(self, args=None, path=None):
       self.path = path or 'mplayer' 
@@ -152,12 +155,12 @@ class MPlayer(Popen):
       Popen.__init__(self, [self.path, '-idle', '-slave', '-quiet']+self.args, stdin=PIPE, stdout=PIPE, stderr=PIPE)
       self.manager = Manager()
       self.defaults = self.manager.dict()
-      self.state = Value('i')
-      self.state.value = STOPPED
+      self._state = Value('i')
+      self._state.value = STOPPED
       self.notifier = SelectQueue()
       self.calls = SelectQueue()
       self.results = Queue()
-      self.ioworker = IOWorker(self.stdin, self.stdout, self.state, self.notifier, self.calls, self.results)
+      self.ioworker = IOWorker(self.stdin, self.stdout, self._state, self.notifier, self.calls, self.results)
       self.ioworker.start()
 
    def kill(self):
@@ -197,8 +200,13 @@ class MPlayer(Popen):
          raise ValueError('%s expects arguments of format %r' % (cmd, ' '.join(str(x) for x in self.cmds[cmd])))
 
    def send_cmd(self, cmd, args, kargs):
+      if self.poll(): raise MPlayerNotRunning('MPlayer instance not running.')
       prefix = kargs.get('prefix', self.defaults.get('prefix', ''))
       default = kargs.get('default', self.defaults.get('default'))
       cmd = '%s %s' % (cmd, ' '.join(arg for arg in self.process_args(cmd, args)))
       self.calls.put([prefix, cmd, default])
       return self.results.get()
+
+
+class MPlayerAsync(MPlayer):
+   pass
