@@ -26,7 +26,7 @@ def SelectQueue():
 
 
 class IOWorker(Process):
-   def __init__(self, stdin, stdout, state, notifier, calls, results, *args, **kargs):
+   def __init__(self, stdin, stdout, state, notifier, calls, results):
       self.stdin = stdin
       self.stdout = stdout
       self._state = state
