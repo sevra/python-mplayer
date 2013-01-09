@@ -14,6 +14,7 @@ compat = lambda func, arg : func(arg, encoding='utf-8' if sys.version > '3' else
 PLAYING = 0
 PAUSED = 1
 STOPPED = 2
+LOADING = 3
 
 
 class MPlayerNotRunning(Exception): pass
@@ -45,17 +46,18 @@ class IOWorker(Process):
    def state(self, value):
       self._state.value = value
          
-   def set_state(self, value):
-      if value == self.state: return # make sure redundant events aren't put in the Queue
-      log.info('STATE: %s' % ('playing' if value == PLAYING else 'paused' if value == PAUSED else 'stopped'))
-      self.state = value
+   def set_state(self, state):
+      if state == self.state: return # make sure redundant events aren't put in the Queue
+      states = ['PLAYING', 'PAUSED', 'STOPPED', 'LOADING']
+      log.info('STATE: %s' % states[state])
+      self.state = state
 
-      if value == STOPPED and self.pending:
-         # If there is a pending 'get' call and play stops...
+      if state == STOPPED and self.pending:
+         # If there are pending 'get' calls and play stops...
          log.info('-------------------- CORNER -------------------')
          self.send_default()
 
-      self.notifier.put(value)
+      self.notifier.put(state)
 
    def convert_result(self, value):
       try:
@@ -100,8 +102,10 @@ class IOWorker(Process):
             call = '%s %s\n' % (prefix, cmd)
             log.info('CALLED: %s' % call.rstrip('\n'))
             self.pending.appendleft(default)
-            if cmd.startswith('get'):
-               if self.state == STOPPED or self.loading:
+            if self.state == LOADING:
+                  self.send_default()
+            elif cmd.startswith('get'):
+               if self.state == STOPPED:
                   self.send_default()
                else:
                   self.stdin.write(compat(bytes, call))
@@ -109,8 +113,7 @@ class IOWorker(Process):
                if cmd.startswith('pause') and self.state in [PAUSED, PLAYING]:
                   self.set_state(PAUSED if self.state == PLAYING else PLAYING)
                elif cmd.startswith('loadfile'):
-                  self.loading = True
-                  log.info('-------------------- LOADING -------------------')
+                  self.set_state(LOADING)
                self.stdin.write(compat(bytes, call))
                self.send_result(None) # non-get calls always return None
          
@@ -119,9 +122,7 @@ class IOWorker(Process):
             log.info(line)
             if line.startswith(b'Starting play'): # sent when playback has started
                self.set_state(PLAYING)
-               self.loading = False
-               log.info('-------------------- LOADED -------------------')
-            elif line == b'\n': # sent when playback has stopped
+            elif line == b'\n' and not self.state == LOADING: # sent when playback has stopped
                self.set_state(STOPPED)
             elif line.startswith(b'\x1b[A\r\x1b[KPosition'): # sent with calls to 'seek'
                self.stdout.readline() # calls to 'seek' send an extra '\n'
